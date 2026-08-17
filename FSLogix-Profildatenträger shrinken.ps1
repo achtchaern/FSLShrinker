@@ -1,4 +1,7 @@
-$VHDXLocations = @("F:\Public\User\*\CsProfiles.VHDX", "D:\Public\User\*\CsProfiles.VHDX")$LogPath = ".\FSLogix-Shrinking-Logs"
+$VHDXLocations = @("F:\Public\User\*\CsProfiles.VHDX", "D:\Public\User\*\CsProfiles.VHDX")
+
+$LogPath = ".\FSLogix-Shrinking-Logs"
+
 function Start-DiskShrinker {
 
     [CmdletBinding()]
@@ -78,7 +81,8 @@ function Start-DiskShrinker {
                     else { $script:MaxQueue = $Throttle * 3 }
 
                 } else { $script:MaxQueue = $MaxQueue }
-
+
+
                 $ProgressId = Get-Random
                 Write-Verbose "Throttle: '$throttle' SleepTimer '$sleepTimer' runSpaceTimeout '$runspaceTimeout' maxQueue '$maxQueue' logFile '$logFile'"
     
@@ -108,7 +112,7 @@ function Start-DiskShrinker {
                         Write-Verbose "Found variables to import: $( ($UserVariables | Select-Object -expandproperty Name | Sort-Object ) -join ", " | Out-String).`n"
                     }
                     if ($ImportModules) {
-                        $UserModules = @( Get-Module | Where-Object { $StandardUserEnv.Modules -notcontains $_.Name -and (Test-Path $_.Path -ErrorAction SilentlyContinue) } | Select-Object -ExpandProperty Path )
+                        $UserModules = @( Get-Module | Where-Object { $StandardUserEnv.Modules -notcontains $_.Name -and (Test-Path $_.Path -EA 0) } | Select-Object -ExpandProperty Path )
                         $UserSnapins = @( Get-PSSnapin | Select-Object -ExpandProperty Name | Where-Object { $StandardUserEnv.Snapins -notcontains $_ } )
                     }
                     if ($ImportFunctions) { $UserFunctions = @( Get-ChildItem function:\ | Where-Object { $StandardUserEnv.Functions -notcontains $_.Name } ) }
@@ -180,7 +184,7 @@ function Start-DiskShrinker {
                         }
     
                         $temphash = $runspaces.clone()
-                        $temphash | Where-Object { $_.runspace -eq $Null } | ForEach-Object { $Runspaces.remove($_) }
+                        $temphash | Where-Object { $_.runspace -eq $Null } | % { $Runspaces.remove($_) }
                         if ($PSBoundParameters['Wait']) { Start-Sleep -milliseconds $SleepTimer }
     
                     } while ($more -and $PSBoundParameters['Wait'])
@@ -201,7 +205,7 @@ function Start-DiskShrinker {
                         if ($UsingVariables) {
                             $List = New-Object 'System.Collections.Generic.List`1[System.Management.Automation.Language.VariableExpressionAst]'
                             ForEach ($Ast in $UsingVariables) { [void]$list.Add($Ast.SubExpression) }
-                            $UsingVar = $UsingVariables | Group-Object -Property SubExpression | ForEach-Object { $_.Group | Select-Object -First 1 }
+                            $UsingVar = $UsingVariables | Group-Object -Property SubExpression | % { $_.Group | Select-Object -First 1 }
     
                             $UsingVariableData = ForEach ($Var in $UsingVar) {
                                 try {
@@ -374,7 +378,7 @@ function Start-DiskShrinker {
                 }
     
                 if ($diskNumber -eq $false) {
-                    try { $mountedDisk | Dismount-DiskImage -ErrorAction SilentlyContinue }
+                    try { $mountedDisk | Dismount-DiskImage -EA 0 }
                     catch { Write-Error 'Could not dismount Disk Due to no Disknumber' }
                     Write-Error 'Cannot get mount information'
                     return
@@ -386,8 +390,12 @@ function Start-DiskShrinker {
     
                     try {
                         $allPartition = Get-Partition -DiskNumber $mountedDisk.Number -ErrorAction Stop
-  
-                         if ($allPartition.Type -contains 'Basic' -or $allPartition.Type -contains 'IFS') {                            $partitionType = $true                            $partition = $allPartition | Where-Object { $_.Type -eq "Basic" -or $_.Type -eq "IFS" }                        }
+    
+                        if ($allPartition.Type -contains 'Basic') {
+                            $partitionType = $true
+                            $partition = $allPartition | Where-Object -Property 'Type' -EQ -Value 'Basic'
+                        }
+
                     }
                     catch {
 
@@ -403,7 +411,7 @@ function Start-DiskShrinker {
                 }
     
                 if ($partitionType -eq $false) {
-                    try { $mountedDisk | Dismount-DiskImage -ErrorAction SilentlyContinue }
+                    try { $mountedDisk | Dismount-DiskImage -EA 0 }
                     catch { Write-Error 'Could not dismount disk with no partition' }
                     Write-Error 'Cannot get partition information'
                     return
@@ -415,7 +423,7 @@ function Start-DiskShrinker {
                 try { New-Item -Path $mountPath -ItemType Directory -ErrorAction Stop | Out-Null }
                 catch {
                     $e = $error[0]
-                    try { $mountedDisk | Dismount-DiskImage -ErrorAction SilentlyContinue }
+                    try { $mountedDisk | Dismount-DiskImage -EA 0 }
                     catch { Write-Error "Could not dismount disk when no folder could be created - `"$e`"" }
                     Write-Error "Failed to create mounting directory - `"$e`""
                     return
@@ -433,8 +441,8 @@ function Start-DiskShrinker {
                 }
                 catch {
                     $e = $error[0]
-                    Remove-Item -Path $mountPath -Force -Recurse -ErrorAction SilentlyContinue
-                    try { $mountedDisk | Dismount-DiskImage -ErrorAction SilentlyContinue }
+                    Remove-Item -Path $mountPath -Force -Recurse -EA 0
+                    try { $mountedDisk | Dismount-DiskImage -EA 0 }
                     catch { Write-Error "Could not dismount disk when no junction point could be created - `"$e`"" }
                     Write-Error "Failed to create junction point to - `"$e`""
                     return
@@ -539,7 +547,7 @@ function Start-DiskShrinker {
             }
             PROCESS {
 
-                Dismount-DiskImage -ImagePath $Disk.FullName -ErrorAction SilentlyContinue
+                Dismount-DiskImage -ImagePath $Disk.FullName -EA 0
                 $startTime = Get-Date
                 if ( $IgnoreLessThanGB ) {
                     $IgnoreLessThanBytes = $IgnoreLessThanGB * 1024 * 1024 * 1024
@@ -597,10 +605,10 @@ function Start-DiskShrinker {
                 $partInfo = $null
                 while (($partInfo | Measure-Object).Count -lt 1 -and $timespan -gt (Get-Date)) {
                     try {
-                        $partInfo = Get-Partition -DiskNumber $mount.DiskNumber -ErrorAction Stop | Where-Object { $.Type -eq "Basic" -or $.Type -eq "IFS"}  -ErrorAction Stop
+                        $partInfo = Get-Partition -DiskNumber $mount.DiskNumber -ErrorAction Stop | Where-Object -Property 'Type' -EQ -Value 'Basic' -ErrorAction Stop
                     }
                     catch {
-                        $partInfo = Get-Partition -DiskNumber $mount.DiskNumber -ErrorAction SilentlyContinue | Select-Object -Last 1
+                        $partInfo = Get-Partition -DiskNumber $mount.DiskNumber -EA 0 | Select-Object -Last 1
                     }
                     Start-Sleep 0.1
                 }
@@ -749,7 +757,7 @@ function Start-DiskShrinker {
 
                     try {
                         $mount = Mount-FslDisk -Path $Disk.FullName -PassThru
-                        $partInfo = Get-Partition -DiskNumber $mount.DiskNumber | Where-Object { $.Type -eq "Basic" -or $.Type -eq "IFS"} 
+                        $partInfo = Get-Partition -DiskNumber $mount.DiskNumber | Where-Object -Property 'Type' -EQ -Value 'Basic'
                         Resize-Partition -InputObject $partInfo -Size $sizeMax -ErrorAction Stop
                         $paramWriteVhdOutput = @{
                             DiskState = "Success"
@@ -893,7 +901,7 @@ function Start-DiskShrinker {
             }
     
             if ($diskNumber -eq $false) {
-                try { $mountedDisk | Dismount-DiskImage -ErrorAction SilentlyContinue }
+                try { $mountedDisk | Dismount-DiskImage -EA 0 }
                 catch { Write-Error 'Could not dismount Disk Due to no Disknumber' }
                 Write-Error 'Cannot get mount information'
                 return
@@ -925,7 +933,7 @@ function Start-DiskShrinker {
             }
     
             if ($partitionType -eq $false) {
-                try { $mountedDisk | Dismount-DiskImage -ErrorAction SilentlyContinue }
+                try { $mountedDisk | Dismount-DiskImage -EA 0 }
                 catch { Write-Error 'Could not dismount disk with no partition' }
                 Write-Error 'Cannot get partition information'
                 return
@@ -937,7 +945,7 @@ function Start-DiskShrinker {
             try { New-Item -Path $mountPath -ItemType Directory -ErrorAction Stop | Out-Null }
             catch {
                 $e = $error[0]
-                try { $mountedDisk | Dismount-DiskImage -ErrorAction SilentlyContinue }
+                try { $mountedDisk | Dismount-DiskImage -EA 0 }
                 catch { Write-Error "Could not dismount disk when no folder could be created - `"$e`"" }
                 Write-Error "Failed to create mounting directory - `"$e`""
                 return
@@ -955,8 +963,8 @@ function Start-DiskShrinker {
             }
             catch {
                 $e = $error[0]
-                Remove-Item -Path $mountPath -Force -Recurse -ErrorAction SilentlyContinue
-                try { $mountedDisk | Dismount-DiskImage -ErrorAction SilentlyContinue }
+                Remove-Item -Path $mountPath -Force -Recurse -EA 0
+                try { $mountedDisk | Dismount-DiskImage -EA 0 }
                 catch {
                     Write-Error "Could not dismount disk when no junction point could be created - `"$e`""
                 }
@@ -1061,7 +1069,7 @@ function Start-DiskShrinker {
             $hyperv = $false
         }
         PROCESS {
-            Dismount-DiskImage -ImagePath $Disk.FullName -ErrorAction SilentlyContinue
+            Dismount-DiskImage -ImagePath $Disk.FullName -EA 0
             $startTime = Get-Date
             if ( $IgnoreLessThanGB ) { $IgnoreLessThanBytes = $IgnoreLessThanGB * 1024 * 1024 * 1024 }
             $originalSize = $Disk.Length
@@ -1110,8 +1118,8 @@ function Start-DiskShrinker {
             $timespan = (Get-Date).AddSeconds(120)
             $partInfo = $null
             while (($partInfo | Measure-Object).Count -lt 1 -and $timespan -gt (Get-Date)) {
-                try { $partInfo = Get-Partition -DiskNumber $mount.DiskNumber -ErrorAction Stop | Where-Object { $.Type -eq "Basic" -or $.Type -eq "IFS"}  -ErrorAction Stop }
-                catch { $partInfo = Get-Partition -DiskNumber $mount.DiskNumber -ErrorAction SilentlyContinue | Select-Object -Last 1 }
+                try { $partInfo = Get-Partition -DiskNumber $mount.DiskNumber -ErrorAction Stop | Where-Object -Property 'Type' -EQ -Value 'Basic' -ErrorAction Stop }
+                catch { $partInfo = Get-Partition -DiskNumber $mount.DiskNumber -EA 0 | Select-Object -Last 1 }
                 Start-Sleep 0.1
             }
     
@@ -1161,7 +1169,8 @@ function Start-DiskShrinker {
                     catch {
                     $partSize = $false
                     Start-Sleep 0.1
-                }
+                }
+
                 
                 $partSize = $false
             }
@@ -1237,7 +1246,7 @@ function Start-DiskShrinker {
     
                 $diskPartResult = invoke-diskpart -Path $tempFileName
 
-                if ($diskPartResult -match "(DiskPart successfully compacted the virtual disk file.)|(Die Datei f.?År virtuelle Datentr.?ger wurde von DiskPart erfolgreich komprimiert)") {
+                if ($diskPartResult -match "(DiskPart successfully compacted the virtual disk file.)|(Die Datei f.?¬År virtuelle Datentr.?ger wurde von DiskPart erfolgreich komprimiert)") {
                     $finalSize = Get-ChildItem $Disk.FullName | Select-Object -ExpandProperty Length
                     $success = $true
                     Remove-Item $tempFileName
@@ -1259,7 +1268,7 @@ function Start-DiskShrinker {
 
                 try {
                     $mount = Mount-FslDisk -Path $Disk.FullName -PassThru
-                    $partInfo = Get-Partition -DiskNumber $mount.DiskNumber | Where-Object { $.Type -eq "Basic" -or $.Type -eq "IFS"}
+                    $partInfo = Get-Partition -DiskNumber $mount.DiskNumber | Where-Object -Property 'Type' -EQ -Value 'Basic'
                     Resize-Partition -InputObject $partInfo -Size $sizeMax -ErrorAction Stop
                     $paramWriteVhdOutput = @{
                         DiskState = "Success"
@@ -1364,15 +1373,42 @@ function Start-DiskShrinker {
     
         }
     
-        if ($PSVersionTable.PSVersion -ge [version]"7.0") { $diskList | ForEach-Object -Parallel $scriptblockForEachObject -ThrottleLimit $ThrottleLimit }
+        if ($PSVersionTable.PSVersion -ge [version]"7.0") { $diskList | % -Parallel $scriptblockForEachObject -ThrottleLimit $ThrottleLimit }
         else { $diskList | Invoke-Parallel -ScriptBlock $scriptblockInvokeParallel -Throttle $ThrottleLimit -ImportFunctions -ImportVariables -ImportModules }
     
     }
     end { }
 
-}
+}
+
 cd $(Split-Path -Parent -Path $MyInvocation.MyCommand.Definition)
 if (!(Test-Path $LogPath)) {New-Item -Type Directory $LogPath | Out-Null}
 Start-Transcript -Path "$LogPath\Output.txt" -Force | Out-Null
 $VHDXLocations | ? {gci $_ -EA 0} | Start-DiskShrinker -LogFilePath "$((gi $LogPath).FullName)\Log.csv" -Verbose
+
+# Final VHDX attachment safety check
+Write-Verbose "Checking for VHDX files that are still attached..."
+
+$stillAttached = @(
+
+    Get-ChildItem $VHDXLocations -Filter *.vhdx -Recurse -EA 0 | % {
+        
+        $image = Get-DiskImage -ImagePath $_.FullName -EA 0
+        if ($image -and $image.Attached) {
+            
+            Write-Warning "VHDX STILL ATTACHED: $($_.FullName)"
+            try { Dismount-DiskImage -ImagePath $_.FullName -ErrorAction Stop }
+            catch { Write-Error "Failed to dismount VHDX: $($_.FullName) - $($_.Exception.Message)" }
+            [PSCustomObject]@{ Path = $_.FullName; Attached = $true }
+            
+        }
+    }
+)
+
+Start-Sleep 2
+
+$stillAttached = @( $stillAttached | % { $image = Get-DiskImage -ImagePath $_.Path -EA 0; if ($image -and $image.Attached) { Write-Error "VHDX COULD NOT BE DISMOUNTED: $($_.Path)"; $_ } } )
+if ($stillAttached.Count -gt 0) { Write-Error "$($stillAttached.Count) VHDX file(s) are still attached."; exit 1 }
+Write-Verbose "Final VHDX attachment check completed successfully."
+
 Stop-Transcript

@@ -9,10 +9,11 @@ A PowerShell script that shrinks FSLogix VHDX profile containers to reclaim unus
 - The `defragsvc` (Disk Defragmenter) and `vds` (Virtual Disk Service) services must be startable
 - VHDX files must not be in active use by FSLogix when the script runs
 
-### Optional: VHDX Integrity Check and Repair
+### Optional: VHDX Filesystem Health Check and Repair
 
-- The **Hyper-V PowerShell module** must be installed (`Install-WindowsFeature Hyper-V-PowerShell` on Server, or enable the Hyper-V Management Tools optional feature on Windows client)
-- Provides the `Test-VHD` and `Repair-VHD` cmdlets used by the `-CheckVhdHealth` and `-RepairVhd` switches
+- **Administrative privileges are required** for `Mount-DiskImage`, `Repair-Volume`, and `Dismount-DiskImage`
+- No additional modules beyond standard Windows Storage cmdlets are needed; there is no Hyper-V dependency
+- **Important limitation:** `-CheckVhdHealth` and `-RepairVhd` validate and repair the *filesystem inside* the VHDX container. They mount the disk image using the built-in Windows Storage cmdlets (`Mount-DiskImage`/`Dismount-DiskImage`) and run `Repair-Volume`. This does **not** inspect or repair VHDX container metadata or format-level corruption. If a VHDX cannot be mounted at all, this is reported as an image/container access failure; no VHDX-level structural repair is attempted.
 
 ## Configuration
 
@@ -42,20 +43,22 @@ Or invoke the function explicitly:
 Start-DiskShrinker -Path "D:\Public\User\*"
 ```
 
-### Shrink with VHDX health check (no repair)
+### Shrink with VHDX filesystem health check (no repair)
 
-Use `-CheckVhdHealth` to non-destructively check each VHDX with `Test-VHD` and report healthy/unhealthy status.
-No modifications are ever made to the VHDX. Unhealthy files produce a warning but the shrink continues.
+Use `-CheckVhdHealth` to non-destructively scan each VHDX's filesystem and report healthy/unhealthy status.
+The VHDX is mounted read-only, scanned with `Repair-Volume -Scan`, and immediately dismounted.
+No modifications are ever made. Issues produce a warning but processing continues for other containers.
 
 ```powershell
 Start-DiskShrinker -Path "D:\Public\User\*" -CheckVhdHealth
 ```
 
-### Shrink with VHDX health check **and** repair
+### Shrink with VHDX filesystem health check **and** repair
 
-Use `-RepairVhd` to opt into automatic repair of any VHDX that fails the health check.
+Use `-RepairVhd` to opt into automatic filesystem repair of any VHDX that fails the health check.
 `-RepairVhd` implies the health check; you do not need to pass `-CheckVhdHealth` as well.
 **The VHDX must not be in active use during repair** — ensure all user sessions are logged off.
+If the VHDX is already mounted (active FSLogix session), it is skipped and a warning is written.
 
 ```powershell
 Start-DiskShrinker -Path "D:\Public\User\*" -RepairVhd
@@ -79,18 +82,20 @@ $VHDXLocations | ? {gci $_ -EA 0} | Start-DiskShrinker -LogFilePath "$((gi $LogP
 | `-PassThru` | Switch | `$false` | Output result objects to the pipeline |
 | `-ThrottleLimit` | Int | `4` | Maximum parallel threads |
 | `-RatioFreeSpace` | Double | `0.05` | Minimum free-space ratio to trigger shrink |
-| `-CheckVhdHealth` | Switch | `$false` | Non-destructively check VHDX health with `Test-VHD`; report status, never modify |
-| `-RepairVhd` | Switch | `$false` | **Check health then repair** unhealthy VHDXs with `Repair-VHD`; implies the health check |
+| `-CheckVhdHealth` | Switch | `$false` | Non-destructively mount and scan the filesystem inside each VHDX; report status, never modify |
+| `-RepairVhd` | Switch | `$false` | **Check health then repair** the filesystem inside unhealthy VHDXs using `Repair-Volume -OfflineScanAndFix`; implies the health check |
 
-## VHDX Integrity Check and Repair – Behavior and Caveats
+## VHDX Filesystem Check and Repair – Behavior and Caveats
 
-- **`-CheckVhdHealth`** is read-only: it runs `Test-VHD` on each VHDX and logs the result; it never alters any file.
-- **`-RepairVhd`** implies the health check: it runs `Test-VHD` first and calls `Repair-VHD` only for VHDXs that are unhealthy. You do not need to pass both switches.
+- **`-CheckVhdHealth`** is read-only: it mounts each VHDX read-only, runs `Repair-Volume -Scan` on its volume(s), reports the result, and dismounts. It never alters any file.
+- **`-RepairVhd`** implies the health check: it scans first and runs `Repair-Volume -OfflineScanAndFix` only for VHDXs that have filesystem errors. You do not need to pass both switches.
 - **Neither switch is active by default.** Normal runs are unaffected.
-- **The VHDX must not be in active use** during the repair. Ensure the user's FSLogix session is logged off and the container is not mounted before running with `-RepairVhd`.
-- If `Test-VHD` or `Repair-VHD` is unavailable (Hyper-V module not installed), a warning is emitted and processing continues normally—no error is thrown.
-- If `Test-VHD` cannot access a file (e.g., locked), a per-file warning is written and the remaining containers continue to be processed.
-- If `Repair-VHD` fails for a specific container, an error is recorded for that file but other containers continue unaffected.
+- **Filesystem-vs-container limitation:** These switches check and repair the NTFS/ReFS filesystem *hosted inside* the VHDX. They do not inspect or repair VHDX container metadata corruption. If a VHDX cannot be mounted, the failure is reported as a container access error and that disk is skipped.
+- **Already-mounted images are skipped:** If a VHDX is currently attached (active FSLogix session), a warning is written and the disk is not touched.
+- **The VHDX must not be in active use** during repair. Ensure the user's FSLogix session is logged off and the container is not mounted before running with `-RepairVhd`.
+- If mounting fails (e.g., file locked or container inaccessible), a per-file warning is written and the remaining containers continue to be processed.
+- If `Repair-Volume` fails for a specific container, an error is recorded for that file but other containers continue unaffected.
+- The disk image is always dismounted in a `finally` block, even if an error occurs during the check or repair.
 - After repair, normal shrinking proceeds. If the repair did not fully fix the container, subsequent operations may still fail and will be logged accordingly.
 
 ## Logging

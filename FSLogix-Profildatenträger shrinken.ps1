@@ -48,7 +48,7 @@ function Start-DiskShrinker {
             end {}
         }
         function Invoke-VhdHealthCheck {
-            [CmdletBinding()]
+            [CmdletBinding(SupportsShouldProcess)]
             Param (
                 [Parameter(Mandatory = $true)][System.IO.FileInfo]$Disk,
                 [Parameter()][switch]$CheckVhdHealth,
@@ -59,46 +59,110 @@ function Start-DiskShrinker {
                 # Skip health check entirely when neither switch is supplied
                 if (-not $CheckVhdHealth -and -not $RepairVhd) { return }
 
-                # Verify Test-VHD cmdlet is available (requires Hyper-V module)
-                if (-not (Get-Command -Name 'Test-VHD' -ErrorAction SilentlyContinue)) {
-                    Write-Warning "[$($Disk.Name)] Test-VHD cmdlet not available. Install the Hyper-V PowerShell module to enable health checks."
+                $diskPath = $Disk.FullName
+                $diskName = $Disk.Name
+
+                # Detect whether the image is already mounted by another process
+                $existingImage = Get-DiskImage -ImagePath $diskPath -ErrorAction SilentlyContinue
+                if ($existingImage -and $existingImage.Attached) {
+                    Write-Warning "[$diskName] VHDX is already mounted (in use). Skipping health check to avoid interfering with the active session: $diskPath"
                     return
                 }
 
-                Write-Verbose "[$($Disk.Name)] Running VHDX health check..."
+                Write-Verbose "[$diskName] Mounting VHDX for filesystem health check: $diskPath"
+                $mountedImage = $null
                 try {
-                    $healthy = Test-VHD -Path $Disk.FullName -ErrorAction Stop
-                }
-                catch {
-                    Write-Warning "[$($Disk.Name)] Health check failed (file may be locked or inaccessible): $($_.Exception.Message)"
-                    return
-                }
+                    try {
+                        $mountedImage = Mount-DiskImage -ImagePath $diskPath -Access ReadOnly -PassThru -ErrorAction Stop
+                    }
+                    catch {
+                        Write-Warning "[$diskName] Failed to mount VHDX image (file may be locked, in use, or structurally inaccessible): $($_.Exception.Message)"
+                        Write-Warning "[$diskName] Note: this tool validates the filesystem inside the VHDX container. It cannot detect or repair VHDX container/metadata corruption."
+                        return
+                    }
 
-                if ($healthy) {
-                    Write-Verbose "[$($Disk.Name)] VHDX integrity check passed."
-                    return
-                }
+                    $diskNumber = ($mountedImage | Get-Disk -ErrorAction SilentlyContinue).Number
+                    if ($null -eq $diskNumber) {
+                        Write-Warning "[$diskName] Could not identify a disk number for mounted image. Skipping health check."
+                        return
+                    }
 
-                Write-Warning "[$($Disk.Name)] VHDX integrity check FAILED: $($Disk.FullName)"
+                    $volumes = Get-Partition -DiskNumber $diskNumber -ErrorAction SilentlyContinue |
+                        Get-Volume -ErrorAction SilentlyContinue |
+                        Where-Object { $_.DriveLetter -and $_.FileSystem -ne '' }
 
-                if (-not $RepairVhd) {
-                    Write-Warning "[$($Disk.Name)] Repair skipped (VHDX is unhealthy). Use -RepairVhd to attempt automatic repair."
-                    return
-                }
+                    if (-not $volumes) {
+                        Write-Warning "[$diskName] No accessible volumes with a drive letter found inside the VHDX. Cannot perform filesystem check."
+                        return
+                    }
 
-                # Verify Repair-VHD cmdlet is available
-                if (-not (Get-Command -Name 'Repair-VHD' -ErrorAction SilentlyContinue)) {
-                    Write-Warning "[$($Disk.Name)] Repair-VHD cmdlet not available. Install the Hyper-V PowerShell module to enable repair."
-                    return
-                }
+                    $overallHealthy = $true
+                    foreach ($vol in $volumes) {
+                        $driveLetter = "$($vol.DriveLetter):"
+                        Write-Verbose "[$diskName] Scanning filesystem on volume $driveLetter (FileSystem: $($vol.FileSystem))..."
+                        try {
+                            $scanResult = Repair-Volume -DriveLetter $vol.DriveLetter -Scan -ErrorAction Stop
+                            if ($scanResult -eq 'NoErrorsFound') {
+                                Write-Verbose "[$diskName] Filesystem scan on $driveLetter passed: NoErrorsFound."
+                            } else {
+                                Write-Warning "[$diskName] Filesystem scan on $driveLetter reported: $scanResult"
+                                $overallHealthy = $false
+                            }
+                        }
+                        catch {
+                            Write-Warning "[$diskName] Filesystem scan on $driveLetter failed: $($_.Exception.Message)"
+                            $overallHealthy = $false
+                        }
+                    }
 
-                Write-Warning "[$($Disk.Name)] Attempting repair of VHDX: $($Disk.FullName)"
-                try {
-                    Repair-VHD -Path $Disk.FullName -ErrorAction Stop
-                    Write-Verbose "[$($Disk.Name)] Repair-VHD completed successfully."
+                    if ($overallHealthy) {
+                        Write-Verbose "[$diskName] Filesystem health check passed for all volumes."
+                    } else {
+                        Write-Warning "[$diskName] Filesystem health check found issues in: $diskPath"
+                        if (-not $RepairVhd) {
+                            Write-Warning "[$diskName] Repair skipped. Use -RepairVhd to attempt filesystem repair."
+                            return
+                        }
+                    }
+
+                    if ($RepairVhd -and -not $overallHealthy) {
+                        # Remount read-write for repair
+                        Write-Verbose "[$diskName] Remounting VHDX read-write for filesystem repair..."
+                        Dismount-DiskImage -ImagePath $diskPath -ErrorAction SilentlyContinue | Out-Null
+                        $mountedImage = $null
+                        try {
+                            $mountedImage = Mount-DiskImage -ImagePath $diskPath -PassThru -ErrorAction Stop
+                        }
+                        catch {
+                            Write-Warning "[$diskName] Failed to remount VHDX for repair: $($_.Exception.Message)"
+                            return
+                        }
+
+                        $diskNumber = ($mountedImage | Get-Disk -ErrorAction SilentlyContinue).Number
+                        $volumes = Get-Partition -DiskNumber $diskNumber -ErrorAction SilentlyContinue |
+                            Get-Volume -ErrorAction SilentlyContinue |
+                            Where-Object { $_.DriveLetter -and $_.FileSystem -ne '' }
+
+                        foreach ($vol in $volumes) {
+                            $driveLetter = "$($vol.DriveLetter):"
+                            if ($PSCmdlet.ShouldProcess($driveLetter, "Repair-Volume OfflineScanAndFix")) {
+                                Write-Warning "[$diskName] Attempting filesystem repair on $driveLetter..."
+                                try {
+                                    $repairResult = Repair-Volume -DriveLetter $vol.DriveLetter -OfflineScanAndFix -ErrorAction Stop
+                                    Write-Verbose "[$diskName] Filesystem repair on $driveLetter completed: $repairResult"
+                                }
+                                catch {
+                                    Write-Error "[$diskName] Filesystem repair on $driveLetter failed: $($_.Exception.Message)"
+                                }
+                            }
+                        }
+                    }
                 }
-                catch {
-                    Write-Error "[$($Disk.Name)] Repair-VHD failed: $($_.Exception.Message)"
+                finally {
+                    if ($mountedImage) {
+                        Dismount-DiskImage -ImagePath $diskPath -ErrorAction SilentlyContinue | Out-Null
+                        Write-Verbose "[$diskName] Dismounted VHDX after health check."
+                    }
                 }
             }
             end {}
@@ -1111,7 +1175,7 @@ function Start-DiskShrinker {
         end { }
     }
     function Invoke-VhdHealthCheck {
-        [CmdletBinding()]
+        [CmdletBinding(SupportsShouldProcess)]
         Param (
             [Parameter(Mandatory = $true)][System.IO.FileInfo]$Disk,
             [Parameter()][switch]$CheckVhdHealth,
@@ -1122,38 +1186,110 @@ function Start-DiskShrinker {
             # Skip health check entirely when neither switch is supplied
             if (-not $CheckVhdHealth -and -not $RepairVhd) { return }
 
-            if (-not (Get-Command -Name 'Test-VHD' -ErrorAction SilentlyContinue)) {
-                Write-Warning "[$($Disk.Name)] Test-VHD cmdlet not available. Install the Hyper-V PowerShell module to enable health checks."
+            $diskPath = $Disk.FullName
+            $diskName = $Disk.Name
+
+            # Detect whether the image is already mounted by another process
+            $existingImage = Get-DiskImage -ImagePath $diskPath -ErrorAction SilentlyContinue
+            if ($existingImage -and $existingImage.Attached) {
+                Write-Warning "[$diskName] VHDX is already mounted (in use). Skipping health check to avoid interfering with the active session: $diskPath"
                 return
             }
-            Write-Verbose "[$($Disk.Name)] Running VHDX health check..."
+
+            Write-Verbose "[$diskName] Mounting VHDX for filesystem health check: $diskPath"
+            $mountedImage = $null
             try {
-                $healthy = Test-VHD -Path $Disk.FullName -ErrorAction Stop
+                try {
+                    $mountedImage = Mount-DiskImage -ImagePath $diskPath -Access ReadOnly -PassThru -ErrorAction Stop
+                }
+                catch {
+                    Write-Warning "[$diskName] Failed to mount VHDX image (file may be locked, in use, or structurally inaccessible): $($_.Exception.Message)"
+                    Write-Warning "[$diskName] Note: this tool validates the filesystem inside the VHDX container. It cannot detect or repair VHDX container/metadata corruption."
+                    return
+                }
+
+                $diskNumber = ($mountedImage | Get-Disk -ErrorAction SilentlyContinue).Number
+                if ($null -eq $diskNumber) {
+                    Write-Warning "[$diskName] Could not identify a disk number for mounted image. Skipping health check."
+                    return
+                }
+
+                $volumes = Get-Partition -DiskNumber $diskNumber -ErrorAction SilentlyContinue |
+                    Get-Volume -ErrorAction SilentlyContinue |
+                    Where-Object { $_.DriveLetter -and $_.FileSystem -ne '' }
+
+                if (-not $volumes) {
+                    Write-Warning "[$diskName] No accessible volumes with a drive letter found inside the VHDX. Cannot perform filesystem check."
+                    return
+                }
+
+                $overallHealthy = $true
+                foreach ($vol in $volumes) {
+                    $driveLetter = "$($vol.DriveLetter):"
+                    Write-Verbose "[$diskName] Scanning filesystem on volume $driveLetter (FileSystem: $($vol.FileSystem))..."
+                    try {
+                        $scanResult = Repair-Volume -DriveLetter $vol.DriveLetter -Scan -ErrorAction Stop
+                        if ($scanResult -eq 'NoErrorsFound') {
+                            Write-Verbose "[$diskName] Filesystem scan on $driveLetter passed: NoErrorsFound."
+                        } else {
+                            Write-Warning "[$diskName] Filesystem scan on $driveLetter reported: $scanResult"
+                            $overallHealthy = $false
+                        }
+                    }
+                    catch {
+                        Write-Warning "[$diskName] Filesystem scan on $driveLetter failed: $($_.Exception.Message)"
+                        $overallHealthy = $false
+                    }
+                }
+
+                if ($overallHealthy) {
+                    Write-Verbose "[$diskName] Filesystem health check passed for all volumes."
+                } else {
+                    Write-Warning "[$diskName] Filesystem health check found issues in: $diskPath"
+                    if (-not $RepairVhd) {
+                        Write-Warning "[$diskName] Repair skipped. Use -RepairVhd to attempt filesystem repair."
+                        return
+                    }
+                }
+
+                if ($RepairVhd -and -not $overallHealthy) {
+                    # Remount read-write for repair
+                    Write-Verbose "[$diskName] Remounting VHDX read-write for filesystem repair..."
+                    Dismount-DiskImage -ImagePath $diskPath -ErrorAction SilentlyContinue | Out-Null
+                    $mountedImage = $null
+                    try {
+                        $mountedImage = Mount-DiskImage -ImagePath $diskPath -PassThru -ErrorAction Stop
+                    }
+                    catch {
+                        Write-Warning "[$diskName] Failed to remount VHDX for repair: $($_.Exception.Message)"
+                        return
+                    }
+
+                    $diskNumber = ($mountedImage | Get-Disk -ErrorAction SilentlyContinue).Number
+                    $volumes = Get-Partition -DiskNumber $diskNumber -ErrorAction SilentlyContinue |
+                        Get-Volume -ErrorAction SilentlyContinue |
+                        Where-Object { $_.DriveLetter -and $_.FileSystem -ne '' }
+
+                    foreach ($vol in $volumes) {
+                        $driveLetter = "$($vol.DriveLetter):"
+                        if ($PSCmdlet.ShouldProcess($driveLetter, "Repair-Volume OfflineScanAndFix")) {
+                            Write-Warning "[$diskName] Attempting filesystem repair on $driveLetter..."
+                            try {
+                                $repairResult = Repair-Volume -DriveLetter $vol.DriveLetter -OfflineScanAndFix -ErrorAction Stop
+                                Write-Verbose "[$diskName] Filesystem repair on $driveLetter completed: $repairResult"
+                            }
+                            catch {
+                                Write-Error "[$diskName] Filesystem repair on $driveLetter failed: $($_.Exception.Message)"
+                            }
+                        }
+                    }
+                }
             }
-            catch {
-                Write-Warning "[$($Disk.Name)] Health check failed (file may be locked or inaccessible): $($_.Exception.Message)"
-                return
-            }
-            if ($healthy) {
-                Write-Verbose "[$($Disk.Name)] VHDX integrity check passed."
-                return
-            }
-            Write-Warning "[$($Disk.Name)] VHDX integrity check FAILED: $($Disk.FullName)"
-            if (-not $RepairVhd) {
-                Write-Warning "[$($Disk.Name)] Repair skipped (VHDX is unhealthy). Use -RepairVhd to attempt automatic repair."
-                return
-            }
-            if (-not (Get-Command -Name 'Repair-VHD' -ErrorAction SilentlyContinue)) {
-                Write-Warning "[$($Disk.Name)] Repair-VHD cmdlet not available. Install the Hyper-V PowerShell module to enable repair."
-                return
-            }
-            Write-Warning "[$($Disk.Name)] Attempting repair of VHDX: $($Disk.FullName)"
-            try {
-                Repair-VHD -Path $Disk.FullName -ErrorAction Stop
-                Write-Verbose "[$($Disk.Name)] Repair-VHD completed successfully."
-            }
-            catch {
-                Write-Error "[$($Disk.Name)] Repair-VHD failed: $($_.Exception.Message)"
+            finally {
+                if ($mountedImage) {
+                    Dismount-DiskImage -ImagePath $diskPath -ErrorAction SilentlyContinue | Out-Null
+                    Write-Verbose "[$diskName] Dismounted VHDX after health check."
+                }
             }
         }
         end {}

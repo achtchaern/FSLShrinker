@@ -18,7 +18,8 @@ function Start-DiskShrinker {
         [Parameter(ValuefromPipelineByPropertyName = $true)][int]$ThrottleLimit = 4,
         [Parameter(ValuefromPipelineByPropertyName = $true)]
         [ValidateRange(0,1)]
-        [double]$RatioFreeSpace = 0.05
+        [double]$RatioFreeSpace = 0.05,
+        [Parameter(ValuefromPipelineByPropertyName = $true)][switch]$Repair
 
     )
     
@@ -43,6 +44,58 @@ function Start-DiskShrinker {
                 }
             }
 
+            end {}
+        }
+        function Invoke-VhdHealthCheck {
+            [CmdletBinding()]
+            Param (
+                [Parameter(Mandatory = $true)][System.IO.FileInfo]$Disk,
+                [Parameter()][switch]$Repair
+            )
+            BEGIN { Set-StrictMode -Version Latest }
+            PROCESS {
+                # Verify Test-VHD cmdlet is available (requires Hyper-V module)
+                if (-not (Get-Command -Name 'Test-VHD' -ErrorAction SilentlyContinue)) {
+                    Write-Warning "[$($Disk.Name)] Test-VHD cmdlet not available. Install the Hyper-V PowerShell module to enable health checks."
+                    return
+                }
+
+                Write-Verbose "[$($Disk.Name)] Running VHDX health check..."
+                try {
+                    $healthy = Test-VHD -Path $Disk.FullName -ErrorAction Stop
+                }
+                catch {
+                    Write-Warning "[$($Disk.Name)] Health check failed (file may be locked or inaccessible): $($_.Exception.Message)"
+                    return
+                }
+
+                if ($healthy) {
+                    Write-Verbose "[$($Disk.Name)] VHDX integrity check passed."
+                    return
+                }
+
+                Write-Warning "[$($Disk.Name)] VHDX integrity check FAILED: $($Disk.FullName)"
+
+                if (-not $Repair) {
+                    Write-Warning "[$($Disk.Name)] Repair skipped. Use -Repair to attempt automatic repair."
+                    return
+                }
+
+                # Verify Repair-VHD cmdlet is available
+                if (-not (Get-Command -Name 'Repair-VHD' -ErrorAction SilentlyContinue)) {
+                    Write-Warning "[$($Disk.Name)] Repair-VHD cmdlet not available. Install the Hyper-V PowerShell module to enable repair."
+                    return
+                }
+
+                Write-Warning "[$($Disk.Name)] Attempting repair of VHDX: $($Disk.FullName)"
+                try {
+                    Repair-VHD -Path $Disk.FullName -ErrorAction Stop
+                    Write-Verbose "[$($Disk.Name)] Repair-VHD completed successfully."
+                }
+                catch {
+                    Write-Error "[$($Disk.Name)] Repair-VHD failed: $($_.Exception.Message)"
+                }
+            }
             end {}
         }
         function Invoke-Parallel {
@@ -535,7 +588,8 @@ function Start-DiskShrinker {
                 [Parameter(ValuefromPipelineByPropertyName = $true)][int]$MountTimeout = 30,
                 [Parameter(ValuefromPipelineByPropertyName = $true)][string]$LogFilePath = "$env:TEMP\FslShrinkDisk $(Get-Date -Format yyyy-MM-dd` HH-mm-ss).csv",
                 [Parameter(ValuefromPipelineByPropertyName = $true)][Switch]$RollingLog,
-                [Parameter(ValuefromPipelineByPropertyName = $true)][switch]$Passthru
+                [Parameter(ValuefromPipelineByPropertyName = $true)][switch]$Passthru,
+                [Parameter(ValuefromPipelineByPropertyName = $true)][switch]$Repair
     
             )
     
@@ -547,6 +601,7 @@ function Start-DiskShrinker {
             }
             PROCESS {
 
+                Invoke-VhdHealthCheck -Disk $Disk -Repair:$Repair
                 Dismount-DiskImage -ImagePath $Disk.FullName -EA 0
                 $startTime = Get-Date
                 if ( $IgnoreLessThanGB ) {
@@ -1049,6 +1104,50 @@ function Start-DiskShrinker {
         } 
         end { }
     }
+    function Invoke-VhdHealthCheck {
+        [CmdletBinding()]
+        Param (
+            [Parameter(Mandatory = $true)][System.IO.FileInfo]$Disk,
+            [Parameter()][switch]$Repair
+        )
+        BEGIN { Set-StrictMode -Version Latest }
+        PROCESS {
+            if (-not (Get-Command -Name 'Test-VHD' -ErrorAction SilentlyContinue)) {
+                Write-Warning "[$($Disk.Name)] Test-VHD cmdlet not available. Install the Hyper-V PowerShell module to enable health checks."
+                return
+            }
+            Write-Verbose "[$($Disk.Name)] Running VHDX health check..."
+            try {
+                $healthy = Test-VHD -Path $Disk.FullName -ErrorAction Stop
+            }
+            catch {
+                Write-Warning "[$($Disk.Name)] Health check failed (file may be locked or inaccessible): $($_.Exception.Message)"
+                return
+            }
+            if ($healthy) {
+                Write-Verbose "[$($Disk.Name)] VHDX integrity check passed."
+                return
+            }
+            Write-Warning "[$($Disk.Name)] VHDX integrity check FAILED: $($Disk.FullName)"
+            if (-not $Repair) {
+                Write-Warning "[$($Disk.Name)] Repair skipped. Use -Repair to attempt automatic repair."
+                return
+            }
+            if (-not (Get-Command -Name 'Repair-VHD' -ErrorAction SilentlyContinue)) {
+                Write-Warning "[$($Disk.Name)] Repair-VHD cmdlet not available. Install the Hyper-V PowerShell module to enable repair."
+                return
+            }
+            Write-Warning "[$($Disk.Name)] Attempting repair of VHDX: $($Disk.FullName)"
+            try {
+                Repair-VHD -Path $Disk.FullName -ErrorAction Stop
+                Write-Verbose "[$($Disk.Name)] Repair-VHD completed successfully."
+            }
+            catch {
+                Write-Error "[$($Disk.Name)] Repair-VHD failed: $($_.Exception.Message)"
+            }
+        }
+        end {}
+    }
     function Optimize-OneDisk {
         [CmdletBinding()]
     
@@ -1060,7 +1159,8 @@ function Start-DiskShrinker {
             [Parameter(ValuefromPipelineByPropertyName = $true)][double]$RatioFreeSpace = 0.05,
             [Parameter(ValuefromPipelineByPropertyName = $true)][int]$MountTimeout = 30,    
             [Parameter(ValuefromPipelineByPropertyName = $true)][string]$LogFilePath = "$env:TEMP\FslShrinkDisk $(Get-Date -Format yyyy-MM-dd` HH-mm-ss).csv",
-            [Parameter(ValuefromPipelineByPropertyName = $true)][Switch]$RollingLog,[Parameter(ValuefromPipelineByPropertyName = $true)][switch]$Passthru
+            [Parameter(ValuefromPipelineByPropertyName = $true)][Switch]$RollingLog,[Parameter(ValuefromPipelineByPropertyName = $true)][switch]$Passthru,
+            [Parameter(ValuefromPipelineByPropertyName = $true)][switch]$Repair
     
         )
     
@@ -1069,6 +1169,7 @@ function Start-DiskShrinker {
             $hyperv = $false
         }
         PROCESS {
+            Invoke-VhdHealthCheck -Disk $Disk -Repair:$Repair
             Dismount-DiskImage -ImagePath $Disk.FullName -EA 0
             $startTime = Get-Date
             if ( $IgnoreLessThanGB ) { $IgnoreLessThanBytes = $IgnoreLessThanGB * 1024 * 1024 * 1024 }
@@ -1348,6 +1449,7 @@ function Start-DiskShrinker {
                 LogFilePath         = $using:LogFilePath
                 PassThru            = $using:PassThru
                 RatioFreeSpace      = $using:RatioFreeSpace
+                Repair              = $using:Repair
             }
             Optimize-OneDisk @paramOptimizeOneDisk
     
@@ -1368,6 +1470,7 @@ function Start-DiskShrinker {
                 LogFilePath         = $LogFilePath
                 PassThru            = $PassThru
                 RatioFreeSpace      = $RatioFreeSpace
+                Repair              = $Repair
             }
             Optimize-OneDisk @paramOptimizeOneDisk
     

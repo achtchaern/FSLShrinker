@@ -19,7 +19,8 @@ function Start-DiskShrinker {
         [Parameter(ValuefromPipelineByPropertyName = $true)]
         [ValidateRange(0,1)]
         [double]$RatioFreeSpace = 0.05,
-        [Parameter(ValuefromPipelineByPropertyName = $true)][switch]$Repair
+        [Parameter(ValuefromPipelineByPropertyName = $true)][switch]$CheckVhdHealth,
+        [Parameter(ValuefromPipelineByPropertyName = $true)][switch]$RepairVhd
 
     )
     
@@ -50,10 +51,14 @@ function Start-DiskShrinker {
             [CmdletBinding()]
             Param (
                 [Parameter(Mandatory = $true)][System.IO.FileInfo]$Disk,
-                [Parameter()][switch]$Repair
+                [Parameter()][switch]$CheckVhdHealth,
+                [Parameter()][switch]$RepairVhd
             )
             BEGIN { Set-StrictMode -Version Latest }
             PROCESS {
+                # Skip health check entirely when neither switch is supplied
+                if (-not $CheckVhdHealth -and -not $RepairVhd) { return }
+
                 # Verify Test-VHD cmdlet is available (requires Hyper-V module)
                 if (-not (Get-Command -Name 'Test-VHD' -ErrorAction SilentlyContinue)) {
                     Write-Warning "[$($Disk.Name)] Test-VHD cmdlet not available. Install the Hyper-V PowerShell module to enable health checks."
@@ -76,8 +81,8 @@ function Start-DiskShrinker {
 
                 Write-Warning "[$($Disk.Name)] VHDX integrity check FAILED: $($Disk.FullName)"
 
-                if (-not $Repair) {
-                    Write-Warning "[$($Disk.Name)] Repair skipped. Use -Repair to attempt automatic repair."
+                if (-not $RepairVhd) {
+                    Write-Warning "[$($Disk.Name)] Repair skipped (VHDX is unhealthy). Use -RepairVhd to attempt automatic repair."
                     return
                 }
 
@@ -589,7 +594,8 @@ function Start-DiskShrinker {
                 [Parameter(ValuefromPipelineByPropertyName = $true)][string]$LogFilePath = "$env:TEMP\FslShrinkDisk $(Get-Date -Format yyyy-MM-dd` HH-mm-ss).csv",
                 [Parameter(ValuefromPipelineByPropertyName = $true)][Switch]$RollingLog,
                 [Parameter(ValuefromPipelineByPropertyName = $true)][switch]$Passthru,
-                [Parameter(ValuefromPipelineByPropertyName = $true)][switch]$Repair
+                [Parameter(ValuefromPipelineByPropertyName = $true)][switch]$CheckVhdHealth,
+                [Parameter(ValuefromPipelineByPropertyName = $true)][switch]$RepairVhd
     
             )
     
@@ -601,7 +607,7 @@ function Start-DiskShrinker {
             }
             PROCESS {
 
-                Invoke-VhdHealthCheck -Disk $Disk -Repair:$Repair
+                Invoke-VhdHealthCheck -Disk $Disk -CheckVhdHealth:$CheckVhdHealth -RepairVhd:$RepairVhd
                 Dismount-DiskImage -ImagePath $Disk.FullName -EA 0
                 $startTime = Get-Date
                 if ( $IgnoreLessThanGB ) {
@@ -1108,10 +1114,14 @@ function Start-DiskShrinker {
         [CmdletBinding()]
         Param (
             [Parameter(Mandatory = $true)][System.IO.FileInfo]$Disk,
-            [Parameter()][switch]$Repair
+            [Parameter()][switch]$CheckVhdHealth,
+            [Parameter()][switch]$RepairVhd
         )
         BEGIN { Set-StrictMode -Version Latest }
         PROCESS {
+            # Skip health check entirely when neither switch is supplied
+            if (-not $CheckVhdHealth -and -not $RepairVhd) { return }
+
             if (-not (Get-Command -Name 'Test-VHD' -ErrorAction SilentlyContinue)) {
                 Write-Warning "[$($Disk.Name)] Test-VHD cmdlet not available. Install the Hyper-V PowerShell module to enable health checks."
                 return
@@ -1129,8 +1139,8 @@ function Start-DiskShrinker {
                 return
             }
             Write-Warning "[$($Disk.Name)] VHDX integrity check FAILED: $($Disk.FullName)"
-            if (-not $Repair) {
-                Write-Warning "[$($Disk.Name)] Repair skipped. Use -Repair to attempt automatic repair."
+            if (-not $RepairVhd) {
+                Write-Warning "[$($Disk.Name)] Repair skipped (VHDX is unhealthy). Use -RepairVhd to attempt automatic repair."
                 return
             }
             if (-not (Get-Command -Name 'Repair-VHD' -ErrorAction SilentlyContinue)) {
@@ -1160,7 +1170,8 @@ function Start-DiskShrinker {
             [Parameter(ValuefromPipelineByPropertyName = $true)][int]$MountTimeout = 30,    
             [Parameter(ValuefromPipelineByPropertyName = $true)][string]$LogFilePath = "$env:TEMP\FslShrinkDisk $(Get-Date -Format yyyy-MM-dd` HH-mm-ss).csv",
             [Parameter(ValuefromPipelineByPropertyName = $true)][Switch]$RollingLog,[Parameter(ValuefromPipelineByPropertyName = $true)][switch]$Passthru,
-            [Parameter(ValuefromPipelineByPropertyName = $true)][switch]$Repair
+            [Parameter(ValuefromPipelineByPropertyName = $true)][switch]$CheckVhdHealth,
+            [Parameter(ValuefromPipelineByPropertyName = $true)][switch]$RepairVhd
     
         )
     
@@ -1169,7 +1180,7 @@ function Start-DiskShrinker {
             $hyperv = $false
         }
         PROCESS {
-            Invoke-VhdHealthCheck -Disk $Disk -Repair:$Repair
+            Invoke-VhdHealthCheck -Disk $Disk -CheckVhdHealth:$CheckVhdHealth -RepairVhd:$RepairVhd
             Dismount-DiskImage -ImagePath $Disk.FullName -EA 0
             $startTime = Get-Date
             if ( $IgnoreLessThanGB ) { $IgnoreLessThanBytes = $IgnoreLessThanGB * 1024 * 1024 * 1024 }
@@ -1449,7 +1460,8 @@ function Start-DiskShrinker {
                 LogFilePath         = $using:LogFilePath
                 PassThru            = $using:PassThru
                 RatioFreeSpace      = $using:RatioFreeSpace
-                Repair              = $using:Repair
+                CheckVhdHealth      = $using:CheckVhdHealth
+                RepairVhd           = $using:RepairVhd
             }
             Optimize-OneDisk @paramOptimizeOneDisk
     
@@ -1470,7 +1482,8 @@ function Start-DiskShrinker {
                 LogFilePath         = $LogFilePath
                 PassThru            = $PassThru
                 RatioFreeSpace      = $RatioFreeSpace
-                Repair              = $Repair
+                CheckVhdHealth      = $CheckVhdHealth
+                RepairVhd           = $RepairVhd
             }
             Optimize-OneDisk @paramOptimizeOneDisk
     
